@@ -1,5 +1,10 @@
 require('dotenv').config();
 
+const fs = require('fs');
+const path = require('path');
+
+const ENV_PATH = path.resolve(__dirname, '..', '.env');
+
 const required = {
   TELEGRAM_BOT_TOKEN: 'Telegram bot token from @BotFather',
   BUNNY_STREAM_LIBRARY_ID: 'Bunny Stream Video Library ID (number)',
@@ -53,5 +58,36 @@ const config = {
     .map((ext) => ext.trim().toLowerCase().replace(/^\./, ''))
     .filter(Boolean),
 };
+
+/**
+ * Changes the Bunny Stream collection ID at runtime AND persists it to
+ * .env so it survives bot restarts. Empty string clears the collection.
+ * Returns the new value.
+ */
+function setCollectionId(guid) {
+  const value = String(guid || '').trim();
+
+  let content = '';
+  try {
+    content = fs.readFileSync(ENV_PATH, 'utf8');
+  } catch {
+    // No .env file: nothing to persist.
+  }
+
+  const lines = content.split('\n');
+  const idx = lines.findIndex((line) => line.startsWith('BUNNY_STREAM_COLLECTION_ID='));
+  const newLine = `BUNNY_STREAM_COLLECTION_ID=${value}`;
+  if (idx >= 0) {
+    lines[idx] = newLine;
+  } else {
+    lines.push(newLine);
+  }
+  fs.writeFileSync(ENV_PATH, `${lines.join('\n')}\n`);
+
+  config.bunnyStreamCollectionId = value;
+  return value;
+}
+
+config.setCollectionId = setCollectionId;
 
 module.exports = config;

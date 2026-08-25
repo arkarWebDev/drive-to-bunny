@@ -69,7 +69,7 @@ All configuration lives in `.env` (copy from `.env.example`):
 | `BUNNY_STREAM_LIBRARY_ID`   | yes      | Bunny Stream Video Library ID (number)         |
 | `BUNNY_STREAM_API_KEY`      | yes      | Library API key (Stream -> Library -> API Keys)|
 | `TELEGRAM_ALLOWED_USER_IDS` | no       | Comma-separated user IDs; empty = open to all  |
-| `BUNNY_STREAM_COLLECTION_ID`| no       | Collection GUID to add videos to               |
+| `BUNNY_STREAM_COLLECTION_ID`| no       | Collection GUID; also changeable at runtime via `/setcollection` |
 | `ALLOWED_EXTENSIONS`        | no       | Video extensions to accept (default `mov`)     |
 | `MAX_UPLOAD_RETRIES`        | no       | Chunk retry count before aborting (default 5)  |
 | `MAX_FILE_SIZE_MB`          | no       | Skip files above this size; 0 = unlimited      |

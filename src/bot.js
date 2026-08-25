@@ -4,7 +4,7 @@ const path = require('path');
 const { Telegraf } = require('telegraf');
 const config = require('./config');
 const { processDriveLink, cleanupAllWorkDirs } = require('./pipeline');
-const { validateCredentials } = require('./bunny');
+const { validateCredentials, listCollections } = require('./bunny');
 const { splitTelegramMessage, formatBytes } = require('./utils');
 
 // handlerTimeout: Infinity disables Telegraf's 90s default so long-running
@@ -32,6 +32,8 @@ const USAGE = [
   'Commands:',
   '/start - show this message',
   '/id - show your Telegram user ID',
+  '/collection - show the current Bunny collection',
+  '/setcollection <guid> - change the Bunny collection (owner only)',
 ].join('\n');
 
 function logUser(ctx, event = 'message') {
@@ -115,6 +117,80 @@ bot.command('id', (ctx) => {
   logUser(ctx, 'id');
   const userId = ctx.from && ctx.from.id;
   return ctx.reply(`Your Telegram user ID is: ${userId}`);
+});
+
+function htmlEscape(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+bot.command('collection', async (ctx) => {
+  logUser(ctx, 'collection');
+  const current = config.bunnyStreamCollectionId || '(none)';
+  let extra = '';
+  try {
+    const collections = await listCollections({
+      apiKey: config.bunnyStreamApiKey,
+      libraryId: config.bunnyStreamLibraryId,
+    });
+    if (collections.length === 0) {
+      extra = '\n\nYour library has no collections.';
+    } else {
+      extra =
+        '\n\nCollections in your library:\n' +
+        collections.map((c) => `- ${htmlEscape(c.name)}: <code>${htmlEscape(c.guid)}</code>`).join('\n');
+    }
+  } catch {
+    extra = '\n\n(could not fetch collection list)';
+  }
+  return ctx.reply(`Current collection: <b>${htmlEscape(current)}</b>${extra}`, {
+    parse_mode: 'HTML',
+  });
+});
+
+bot.command('setcollection', async (ctx) => {
+  logUser(ctx, 'setcollection');
+  if (config.telegramAllowedUsers.length === 0) {
+    return ctx.reply(
+      'This command is disabled while TELEGRAM_ALLOWED_USER_IDS is empty. ' +
+        'Add your user ID to .env to enable it.',
+    );
+  }
+
+  const arg = ((ctx.message.text || '').split(/\s+/)[1] || '').trim();
+  if (!arg) {
+    return ctx.reply('Usage: /setcollection <collection-guid>\n/setcollection none - clear the collection');
+  }
+
+  let value = arg;
+  if (arg.toLowerCase() === 'none') {
+    value = '';
+  } else {
+    try {
+      const collections = await listCollections({
+        apiKey: config.bunnyStreamApiKey,
+        libraryId: config.bunnyStreamLibraryId,
+      });
+      const found = collections.some((c) => c.guid === value);
+      if (!found) {
+        return ctx.reply(
+          `Collection <code>${htmlEscape(value)}</code> was not found in your library. ` +
+            'Use /collection to list valid GUIDs.',
+          { parse_mode: 'HTML' },
+        );
+      }
+    } catch (err) {
+      console.error('[setcollection] validation failed:', err.message);
+      return ctx.reply('Could not validate the collection against Bunny Stream. Nothing changed.');
+    }
+  }
+
+  config.setCollectionId(value);
+  return ctx.reply(
+    value
+      ? `Collection set to <code>${htmlEscape(value)}</code> and saved to .env. New uploads will use it.`
+      : 'Collection cleared and saved to .env. New uploads will use no collection.',
+    { parse_mode: 'HTML' },
+  );
 });
 
 // Non-text updates: point the user back to link messages.

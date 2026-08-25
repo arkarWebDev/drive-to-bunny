@@ -267,6 +267,17 @@ function embedUrl(libraryId, videoId) {
 }
 
 /**
+ * Lists the collections of the library. Returns [{ guid, name }].
+ */
+async function listCollections({ apiKey, libraryId }) {
+  const { data } = await axios.get(
+    `${API_BASE}/library/${libraryId}/collections`,
+    { headers: authHeaders(apiKey), timeout: 30000 },
+  );
+  return (data.items || []).map((item) => ({ guid: item.guid, name: item.name }));
+}
+
+/**
  * Startup sanity check: verifies the API key can read the library.
  * Returns { ok, status, message } and never throws.
  */
@@ -291,5 +302,6 @@ module.exports = {
   waitForVideoReady,
   getVideoPlayData,
   embedUrl,
+  listCollections,
   validateCredentials,
 };
