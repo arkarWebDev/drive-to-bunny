@@ -290,7 +290,11 @@ bot.on('text', async (ctx) => {
   logUser(ctx, 'text');
 
   const text = ctx.message.text.trim();
-  if (text.startsWith('/')) return; // commands are handled by their own handlers
+  if (text.startsWith('/')) {
+    return ctx.reply(
+      `Unknown command: ${text.split(/\s+/)[0]}\nUse /start or /help to see available commands.`,
+    );
+  }
 
   const linkMatches = text.match(/https?:\/\/[^\s]+/gi) || [];
   if (linkMatches.length > 1) {
