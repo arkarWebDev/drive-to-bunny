@@ -5,6 +5,7 @@ const { Telegraf } = require('telegraf');
 const config = require('./config');
 const { processDriveLink, cleanupAllWorkDirs } = require('./pipeline');
 const { validateCredentials, listCollections } = require('./bunny');
+const { recordRun, getRecentRuns } = require('./history');
 const { splitTelegramMessage, formatBytes } = require('./utils');
 
 // handlerTimeout: Infinity disables Telegraf's 90s default so long-running
@@ -15,6 +16,7 @@ const bot = new Telegraf(config.telegramBotToken, { handlerTimeout: Infinity });
 // are queued and processed automatically in order.
 const taskQueues = new Map(); // chatId -> string[] of links
 const activeChats = new Set(); // chatId -> currently processing
+const abortControllers = new Map(); // chatId -> AbortController for the running task
 
 const DRIVE_LINK_PATTERN = /drive\.google\.com|^[A-Za-z0-9_-]{25,}$/;
 
@@ -39,6 +41,9 @@ const USAGE = [
   '/collection - show the current Bunny collection',
   '/setcollection <guid> - change the Bunny collection (owner only)',
   '/queue - show the current task queue status',
+  '/cancel - cancel the running task',
+  '/cancel all - cancel everything, including queued tasks',
+  '/history - show recent uploads',
 ].join('\n');
 
 function logUser(ctx, event = 'message') {
@@ -53,6 +58,9 @@ function logUser(ctx, event = 'message') {
 
 function friendlyError(err) {
   const message = String(err && err.message ? err.message : err);
+  if (message.includes('CANCELLED')) {
+    return 'Task cancelled.';
+  }
   if (message.includes('INVALID_LINK')) {
     return 'That does not look like a valid Google Drive link.';
   }
@@ -208,6 +216,65 @@ bot.command('queue', (ctx) => {
   return ctx.reply('Queue status: idle, no tasks pending.');
 });
 
+bot.command('cancel', (ctx) => {
+  logUser(ctx, 'cancel');
+  const chatId = ctx.chat.id;
+  const arg = ((ctx.message.text || '').split(/\s+/)[1] || '').toLowerCase();
+
+  if (arg === 'all') {
+    const queued = (taskQueues.get(chatId) || []).length;
+    taskQueues.delete(chatId);
+    const controller = abortControllers.get(chatId);
+    if (controller && !controller.signal.aborted) {
+      controller.abort();
+      return ctx.reply(`Cancelling the running task and removing ${queued} queued item(s).`);
+    }
+    return ctx.reply(`No task running. Removed ${queued} queued item(s).`);
+  }
+
+  const controller = abortControllers.get(chatId);
+  if (!controller || controller.signal.aborted) {
+    const queued = (taskQueues.get(chatId) || []).length;
+    if (queued > 0) {
+      return ctx.reply(`No task running, but ${queued} task(s) are queued. Use /cancel all to clear the queue.`);
+    }
+    return ctx.reply('No task running.');
+  }
+  controller.abort();
+  return ctx.reply('Cancelling the current task... Temp files will be cleaned up.');
+});
+
+bot.command('history', (ctx) => {
+  logUser(ctx, 'history');
+  const chatId = ctx.chat.id;
+  let runs;
+  try {
+    runs = getRecentRuns(chatId, 10);
+  } catch (err) {
+    console.error('[history] failed:', err.message);
+    return ctx.reply('Could not read history.');
+  }
+  if (runs.length === 0) return ctx.reply('No history yet.');
+
+  const lines = ['<b>Recent uploads:</b>', ''];
+  runs.forEach((run) => {
+    const when = String(run.created_at).slice(0, 16);
+    const status = run.status.toUpperCase();
+    lines.push(`#${run.id} ${when} - ${status} - ${run.video_count} video(s) - ${formatBytes(run.total_bytes)}`);
+    for (const video of run.videos) {
+      lines.push(`  ${video.name}`);
+      lines.push(`  <code>${video.embed_url}</code>`);
+    }
+    if (run.error) lines.push(`  <i>${run.error}</i>`);
+    lines.push('');
+  });
+
+  for (const chunk of splitTelegramMessage(lines.join('\n'))) {
+    bot.telegram.sendMessage(chatId, chunk, { parse_mode: 'HTML' }).catch(() => {});
+  }
+  return undefined;
+});
+
 // Non-text updates: point the user back to link messages.
 bot.on(
   ['photo', 'document', 'audio', 'video', 'voice', 'sticker', 'contact', 'location'],
@@ -260,6 +327,9 @@ bot.on('text', async (ctx) => {
  * Runs the pipeline for one link and replies with the result report.
  */
 async function runTask(chatId, link, queueRemaining) {
+  const controller = new AbortController();
+  abortControllers.set(chatId, controller);
+
   const statusMessage = await bot.telegram.sendMessage(
     chatId,
     queueRemaining > 0
@@ -281,7 +351,7 @@ async function runTask(chatId, link, queueRemaining) {
 
   try {
     const { videos, skippedCount, ignoredCount, totalBytes, workDir, cleanedUp, cleanupError } =
-      await processDriveLink(link, setStatus);
+      await processDriveLink(link, setStatus, { signal: controller.signal });
 
     const lines = [
       `<b>Upload complete</b> - ${videos.length} video${videos.length === 1 ? '' : 's'}`,
@@ -311,9 +381,35 @@ async function runTask(chatId, link, queueRemaining) {
     for (const chunk of splitTelegramMessage(lines.join('\n'))) {
       await bot.telegram.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
     }
+
+    try {
+      recordRun({
+        chatId,
+        link,
+        status: 'success',
+        videos,
+        totalBytes,
+      });
+    } catch (err) {
+      console.error('[history] failed to record run:', err.message);
+    }
   } catch (err) {
     console.error('[pipeline error]', err);
-    await bot.telegram.sendMessage(chatId, `Failed: ${friendlyError(err)}`).catch(() => {});
+    const friendly = friendlyError(err);
+    await bot.telegram.sendMessage(chatId, `Failed: ${friendly}`).catch(() => {});
+    try {
+      recordRun({
+        chatId,
+        link,
+        status: controller.signal.aborted ? 'cancelled' : 'failed',
+        totalBytes: 0,
+        error: friendly,
+      });
+    } catch (historyErr) {
+      console.error('[history] failed to record run:', historyErr.message);
+    }
+  } finally {
+    abortControllers.delete(chatId);
   }
 }
 

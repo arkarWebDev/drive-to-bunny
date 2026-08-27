@@ -112,10 +112,11 @@ function detectDriveError(html) {
  * Returns null when the ID is not a public folder, [] for an empty folder,
  * or [{ id, name, isFolder }].
  */
-async function listFolderEntries(folderId) {
+async function listFolderEntries(folderId, signal) {
   const response = await axios.get(`${FOLDER_VIEW_BASE}?id=${folderId}`, {
     headers: { 'User-Agent': USER_AGENT },
     timeout: 60000,
+    signal,
     validateStatus: (status) => status >= 200 && status < 400,
   });
 
@@ -145,13 +146,14 @@ async function listFolderEntries(folderId) {
  * Recursively walks a public folder and returns every file entry as
  * { id, name }. onFound(total) is called as files are discovered.
  */
-async function walkFolder(folderId, onFound = () => {}) {
+async function walkFolder(folderId, onFound = () => {}, signal) {
   const files = [];
   const stack = [folderId];
 
   while (stack.length > 0) {
+    if (signal && signal.aborted) throw new Error('CANCELLED');
     const currentId = stack.pop();
-    const entries = await listFolderEntries(currentId);
+    const entries = await listFolderEntries(currentId, signal);
     if (entries === null) continue;
 
     for (const entry of entries) {
@@ -167,11 +169,12 @@ async function walkFolder(folderId, onFound = () => {}) {
   return files;
 }
 
-async function requestAsStream(url) {
+async function requestAsStream(url, signal) {
   return axios.get(url, {
     responseType: 'stream',
     maxRedirects: 5,
     timeout: 0,
+    signal,
     validateStatus: (status) => status >= 200 && status < 400,
     headers: {
       'User-Agent': USER_AGENT,
@@ -190,15 +193,17 @@ async function requestAsStream(url) {
 async function downloadFromDrive(
   driveId,
   destPath,
-  { maxFileBytes = 0, onProgress = () => {} } = {},
+  { maxFileBytes = 0, onProgress = () => {}, signal } = {},
 ) {
   let url = `${UC_BASE}?export=download&id=${driveId}`;
 
   for (let attempt = 0; attempt < MAX_CONFIRM_ATTEMPTS; attempt += 1) {
+    if (signal && signal.aborted) throw new Error('CANCELLED');
     let response;
     try {
-      response = await requestAsStream(url);
+      response = await requestAsStream(url, signal);
     } catch (err) {
+      if (signal && signal.aborted) throw new Error('CANCELLED');
       if (err.response && err.response.status === 404) {
         throw new Error('DRIVE_NOT_FOUND');
       }

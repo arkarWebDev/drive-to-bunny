@@ -37,6 +37,11 @@ share link -> list folder tree -> download video files -> TUS upload to Bunny St
 - Robust temp cleanup: `finally` blocks, signal handlers, crash handlers,
   and a startup sweep with live-PID detection
 - Single-instance lock, per-chat task guard, friendly error messages
+- **Multi-link queue**: send links while a task runs, they queue automatically
+- **`/cancel` / `/cancel all`**: abort the running task mid-download/upload
+  (AbortController), temp files still get cleaned up
+- **History**: every run is stored in SQLite (`data/history.db`) - `/history`
+  shows the last 10 runs with their Bunny URLs
 - Optional allow-list of Telegram user IDs
 
 ## Requirements
@@ -133,12 +138,13 @@ pm2 restart tele-upload-bnb          # restart after code changes
 
 ```
 src/
-  bot.js       # Telegraf bot: auth gate, edge cases, reports, lifecycle
-  config.js    # .env loading + validation
+  bot.js       # Telegraf bot: auth gate, queue, cancel, history, reports
+  config.js    # .env loading + validation + runtime collection override
   drive.js     # Drive link parsing, folder listing, file downloads
   extract.js   # streaming ZIP extraction (extension filter) for ZIP links
-  bunny.js     # Bunny Stream API: create, TUS upload, credential check
-  pipeline.js  # workflow orchestration + guaranteed temp cleanup
+  bunny.js     # Bunny Stream API: create, TUS upload, collections
+  pipeline.js  # workflow orchestration + cancellation + temp cleanup
+  history.js   # SQLite history of runs and uploaded videos
   utils.js     # helpers: sanitize, throttle, formats, file signatures
 tests/         # dependency-free unit tests (node:test)
 ```

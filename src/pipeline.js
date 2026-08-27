@@ -69,16 +69,19 @@ async function cleanupAllWorkDirs() {
 
 /**
  * Full workflow:
- *   link -> list folder -> download .MOV files -> Bunny Stream -> URLs
+ *   link -> list folder -> download video files -> Bunny Stream -> URLs
  * Falls back to single-file / ZIP handling when the link is not a folder.
  * The temp working directory is always removed - on success AND on any
  * error inside the flow.
  *
  * onStatus(message) is called for progress updates.
- * Returns { driveId, videos, skippedCount, ignoredCount, totalBytes } where
- * videos is [{ name, videoId, embedUrl }].
+ * options.signal (AbortSignal) aborts the task mid-flight: downloads and
+ * uploads stop, temp files are cleaned up and Error('CANCELLED') is thrown.
+ * Returns { driveId, videos, skippedCount, ignoredCount, totalBytes,
+ * workDir, cleanedUp, cleanupError } where videos is
+ * [{ name, videoId, embedUrl }].
  */
-async function processDriveLink(link, onStatus = () => {}) {
+async function processDriveLink(link, onStatus = () => {}, { signal } = {}) {
   const driveId = extractDriveId(link);
   const workDir = await fs.promises.mkdtemp(
     path.join(os.tmpdir(), `gdrive-mov-${driveId.slice(0, 12)}-`),
@@ -98,7 +101,7 @@ async function processDriveLink(link, onStatus = () => {}) {
     onStatus('[1/3] Listing Google Drive folder contents...');
     const folderFiles = await walkFolder(driveId, (count) => {
       onStatus(`[1/3] Listing folder... ${count} file(s) found so far`);
-    });
+    }, signal);
 
     let localFiles = [];
     let skippedCount = 0;
@@ -119,6 +122,7 @@ async function processDriveLink(link, onStatus = () => {}) {
       const usedNames = new Set();
 
       for (let i = 0; i < videoFiles.length; i += 1) {
+        if (signal && signal.aborted) throw new Error('CANCELLED');
         const file = videoFiles[i];
         const progress = `${i + 1}/${videoFiles.length}`;
         const reportDownload = throttle((received, total) => {
@@ -132,6 +136,7 @@ async function processDriveLink(link, onStatus = () => {}) {
         const result = await downloadFromDrive(file.id, destPath, {
           maxFileBytes: config.maxFileBytes,
           onProgress: reportDownload,
+          signal,
         });
         if (result.skipped) {
           skippedCount += 1;
@@ -147,6 +152,7 @@ async function processDriveLink(link, onStatus = () => {}) {
       const payloadPath = path.join(workDir, 'payload.bin');
       const result = await downloadFromDrive(driveId, payloadPath, {
         maxFileBytes: config.maxFileBytes,
+        signal,
       });
       if (result.skipped) throw new Error('FILE_TOO_LARGE');
 
@@ -179,6 +185,7 @@ async function processDriveLink(link, onStatus = () => {}) {
 
     const videos = [];
     for (let i = 0; i < localFiles.length; i += 1) {
+      if (signal && signal.aborted) throw new Error('CANCELLED');
       const file = localFiles[i];
       const progress = `${i + 1}/${localFiles.length}`;
 
@@ -206,6 +213,7 @@ async function processDriveLink(link, onStatus = () => {}) {
         retries: config.maxUploadRetries,
         chunkSizeMb: config.tusChunkSizeMb,
         onProgress: reportUpload,
+        signal,
       });
 
       videos.push({

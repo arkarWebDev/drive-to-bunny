@@ -83,7 +83,7 @@ function encodeMetadata(entries) {
     .join(',');
 }
 
-async function createTusUpload({ headers, size, title, filetype }) {
+async function createTusUpload({ headers, size, title, filetype, signal }) {
   const response = await axios.post(
     TUS_ENDPOINT,
     null,
@@ -94,6 +94,7 @@ async function createTusUpload({ headers, size, title, filetype }) {
         'Upload-Metadata': encodeMetadata({ filetype, title }),
       },
       timeout: 30000,
+      signal,
       validateStatus: (status) => status >= 200 && status < 400,
     },
   );
@@ -105,10 +106,11 @@ async function createTusUpload({ headers, size, title, filetype }) {
   return new URL(location, API_BASE).toString();
 }
 
-async function getUploadOffset(location, headers) {
+async function getUploadOffset(location, headers, signal) {
   const response = await axios.head(location, {
     headers,
     timeout: 30000,
+    signal,
     validateStatus: (status) => status >= 200 && status < 500,
   });
   const offset = Number(response.headers['upload-offset']);
@@ -133,6 +135,7 @@ async function uploadVideoFile({
   retries,
   chunkSizeMb = 8,
   onProgress = () => {},
+  signal,
 }) {
   const size = (await fs.promises.stat(localPath)).size;
   const chunkSize = chunkSizeMb * 1024 * 1024;
@@ -142,8 +145,9 @@ async function uploadVideoFile({
 
   let location;
   try {
-    location = await createTusUpload({ headers, size, title, filetype });
+    location = await createTusUpload({ headers, size, title, filetype, signal });
   } catch (err) {
+    if (signal && signal.aborted) throw new Error('CANCELLED');
     if (err.response && (err.response.status === 401 || err.response.status === 403)) {
       throw new Error('BUNNY_AUTH_FAILED');
     }
@@ -153,7 +157,7 @@ async function uploadVideoFile({
 
   let offset = 0;
   try {
-    const serverOffset = await getUploadOffset(location, headers);
+    const serverOffset = await getUploadOffset(location, headers, signal);
     if (serverOffset > 0) offset = serverOffset;
   } catch {
     // Fresh upload, start from 0.
@@ -162,6 +166,7 @@ async function uploadVideoFile({
 
   let consecutiveFailures = 0;
   while (offset < size) {
+    if (signal && signal.aborted) throw new Error('CANCELLED');
     const end = Math.min(offset + chunkSize, size);
     const chunk = fs.createReadStream(localPath, { start: offset, end: end - 1 });
 
@@ -176,12 +181,14 @@ async function uploadVideoFile({
         maxContentLength: Infinity,
         maxBodyLength: Infinity,
         timeout: 0,
+        signal,
         validateStatus: (status) => status >= 200 && status < 300,
       });
       offset = end;
       consecutiveFailures = 0;
       onProgress(offset, size);
     } catch (err) {
+      if (signal && signal.aborted) throw new Error('CANCELLED');
       consecutiveFailures += 1;
 
       if (err.response && (err.response.status === 401 || err.response.status === 403)) {
@@ -190,7 +197,7 @@ async function uploadVideoFile({
 
       // Re-sync with the server: a chunk may have partially landed.
       try {
-        const serverOffset = await getUploadOffset(location, headers);
+        const serverOffset = await getUploadOffset(location, headers, signal);
         if (serverOffset > offset) offset = serverOffset;
       } catch {
         // Server unreachable; keep the current offset and retry.
