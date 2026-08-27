@@ -10,7 +10,11 @@ const { splitTelegramMessage, formatBytes } = require('./utils');
 // handlerTimeout: Infinity disables Telegraf's 90s default so long-running
 // downloads/uploads/encoding waits are never killed mid-task.
 const bot = new Telegraf(config.telegramBotToken, { handlerTimeout: Infinity });
-const processingChats = new Set();
+
+// Per-chat FIFO queues: one task runs per chat at a time, extra links
+// are queued and processed automatically in order.
+const taskQueues = new Map(); // chatId -> string[] of links
+const activeChats = new Set(); // chatId -> currently processing
 
 const DRIVE_LINK_PATTERN = /drive\.google\.com|^[A-Za-z0-9_-]{25,}$/;
 
@@ -34,6 +38,7 @@ const USAGE = [
   '/id - show your Telegram user ID',
   '/collection - show the current Bunny collection',
   '/setcollection <guid> - change the Bunny collection (owner only)',
+  '/queue - show the current task queue status',
 ].join('\n');
 
 function logUser(ctx, event = 'message') {
@@ -193,6 +198,16 @@ bot.command('setcollection', async (ctx) => {
   );
 });
 
+bot.command('queue', (ctx) => {
+  logUser(ctx, 'queue');
+  const chatId = ctx.chat.id;
+  const queued = (taskQueues.get(chatId) || []).length;
+  if (activeChats.has(chatId)) {
+    return ctx.reply(`Queue status: one task running, ${queued} pending.`);
+  }
+  return ctx.reply('Queue status: idle, no tasks pending.');
+});
+
 // Non-text updates: point the user back to link messages.
 bot.on(
   ['photo', 'document', 'audio', 'video', 'voice', 'sticker', 'contact', 'location'],
@@ -229,15 +244,31 @@ bot.on('text', async (ctx) => {
   }
 
   const chatId = ctx.chat.id;
-  if (processingChats.has(chatId)) {
-    return ctx.reply('A previous task is still running for this chat. Please wait.');
-  }
-  processingChats.add(chatId);
 
-  const statusMessage = await ctx.reply('Starting task...');
+  const list = taskQueues.get(chatId) || [];
+  list.push(text);
+  taskQueues.set(chatId, list);
+
+  const startedNow = !activeChats.has(chatId);
+  if (!startedNow) {
+    return ctx.reply(`Task queued (position #${list.length}). It will start automatically when the current task finishes.`);
+  }
+  startQueueWorker(chatId).catch(() => {});
+});
+
+/**
+ * Runs the pipeline for one link and replies with the result report.
+ */
+async function runTask(chatId, link, queueRemaining) {
+  const statusMessage = await bot.telegram.sendMessage(
+    chatId,
+    queueRemaining > 0
+      ? `Starting queued task... (${queueRemaining} more in queue)`
+      : 'Starting task...',
+  );
   const setStatus = async (statusText) => {
     try {
-      await ctx.telegram.editMessageText(
+      await bot.telegram.editMessageText(
         chatId,
         statusMessage.message_id,
         undefined,
@@ -250,7 +281,7 @@ bot.on('text', async (ctx) => {
 
   try {
     const { videos, skippedCount, ignoredCount, totalBytes, workDir, cleanedUp, cleanupError } =
-      await processDriveLink(text, setStatus);
+      await processDriveLink(link, setStatus);
 
     const lines = [
       `<b>Upload complete</b> - ${videos.length} video${videos.length === 1 ? '' : 's'}`,
@@ -278,15 +309,33 @@ bot.on('text', async (ctx) => {
     }
 
     for (const chunk of splitTelegramMessage(lines.join('\n'))) {
-      await ctx.reply(chunk, { parse_mode: 'HTML' });
+      await bot.telegram.sendMessage(chatId, chunk, { parse_mode: 'HTML' });
     }
   } catch (err) {
     console.error('[pipeline error]', err);
-    await ctx.reply(`Failed: ${friendlyError(err)}`);
-  } finally {
-    processingChats.delete(chatId);
+    await bot.telegram.sendMessage(chatId, `Failed: ${friendlyError(err)}`).catch(() => {});
   }
-});
+}
+
+/**
+ * Drains the queue for one chat sequentially.
+ */
+async function startQueueWorker(chatId) {
+  if (activeChats.has(chatId)) return;
+  activeChats.add(chatId);
+  try {
+    const list = taskQueues.get(chatId) || [];
+    while (list.length > 0) {
+      const link = list.shift();
+      await runTask(chatId, link, list.length);
+    }
+  } finally {
+    activeChats.delete(chatId);
+    if ((taskQueues.get(chatId) || []).length === 0) {
+      taskQueues.delete(chatId);
+    }
+  }
+}
 
 bot.catch((err, ctx) => {
   console.error('[bot error]', err);
