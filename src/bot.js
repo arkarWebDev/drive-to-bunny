@@ -22,6 +22,19 @@ const DRIVE_LINK_PATTERN = /drive\.google\.com|^[A-Za-z0-9_-]{25,}$/;
 
 const EXT_LABEL = config.allowedExtensions.map((ext) => `.${ext.toUpperCase()}`).join('/');
 
+// Telegraf continues the middleware chain after a command handler runs,
+// so the text handler must skip known commands (they already answered).
+const KNOWN_COMMANDS = new Set([
+  'start',
+  'help',
+  'id',
+  'queue',
+  'cancel',
+  'collection',
+  'setcollection',
+  'history',
+]);
+
 const USAGE = [
   'Welcome. Send me a public Google Drive folder link (set to "Anyone with the link") and I will:',
   '',
@@ -291,9 +304,14 @@ bot.on('text', async (ctx) => {
 
   const text = ctx.message.text.trim();
   if (text.startsWith('/')) {
-    return ctx.reply(
-      `Unknown command: ${text.split(/\s+/)[0]}\nUse /start or /help to see available commands.`,
-    );
+    const rawCmd = text.split(/\s+/)[0];
+    const cmd = rawCmd.slice(1).split('@')[0].toLowerCase();
+    if (!KNOWN_COMMANDS.has(cmd)) {
+      return ctx.reply(
+        `Unknown command: ${rawCmd}\nUse /start or /help to see available commands.`,
+      );
+    }
+    return; // known command: already handled by its own handler
   }
 
   const linkMatches = text.match(/https?:\/\/[^\s]+/gi) || [];
