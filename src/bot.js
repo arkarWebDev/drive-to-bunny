@@ -461,8 +461,24 @@ bot.catch((err, ctx) => {
   ctx.reply(`Failed: ${friendlyError(err)}`).catch(() => {});
 });
 
-process.once('SIGINT', () => shutdown('SIGINT'));
-process.once('SIGTERM', () => shutdown('SIGTERM'));
+module.exports = { bot };
+
+// ---------------------------------------------------------------------------
+// Process lifecycle: only when run directly (not when required by tests).
+// ---------------------------------------------------------------------------
+if (require.main === module) {
+  const releaseInstanceLock = acquireInstanceLock();
+
+  async function shutdown(signal) {
+    console.log(`Received ${signal}, cleaning up temp files before exit...`);
+    await cleanupAllWorkDirs();
+    releaseInstanceLock();
+    await bot.stop(signal);
+    process.exit(0);
+  }
+
+  process.once('SIGINT', () => shutdown('SIGINT'));
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
 
 function isPidAlive(pid) {
   try {
@@ -501,8 +517,6 @@ function acquireInstanceLock() {
     }
   };
 }
-
-const releaseInstanceLock = acquireInstanceLock();
 
 // Removes temp dirs left behind by previous runs (killed/crashed bot).
 // Skips dirs owned by a live process and dirs modified recently, so an
@@ -546,47 +560,40 @@ function sweepStaleWorkDirs() {
   }
 }
 
-async function shutdown(signal) {
-  console.log(`Received ${signal}, cleaning up temp files before exit...`);
-  await cleanupAllWorkDirs();
-  releaseInstanceLock();
-  await bot.stop(signal);
-  process.exit(0);
-}
-
-process.on('uncaughtException', async (err) => {
-  console.error('[fatal] uncaught exception:', err);
-  await cleanupAllWorkDirs();
-  releaseInstanceLock();
-  process.exit(1);
-});
-
-process.on('unhandledRejection', async (reason) => {
-  console.error('[fatal] unhandled rejection:', reason);
-  await cleanupAllWorkDirs();
-  releaseInstanceLock();
-  process.exit(1);
-});
-
-sweepStaleWorkDirs();
-
-bot
-  .launch()
-  .then(async () => {
-    console.log('Bot is running. Send a Google Drive folder link.');
-    const check = await validateCredentials({
-      apiKey: config.bunnyStreamApiKey,
-      libraryId: config.bunnyStreamLibraryId,
-    });
-    if (check.ok) {
-      console.log('Bunny Stream credentials OK.');
-    } else {
-      console.error(
-        `[warn] Bunny Stream credential check failed (HTTP ${check.status || '?'}): ${check.message} - uploads will fail.`,
-      );
-    }
-  })
-  .catch((err) => {
-    console.error('Failed to start bot:', err.message);
+  process.on('uncaughtException', async (err) => {
+    console.error('[fatal] uncaught exception:', err);
+    await cleanupAllWorkDirs();
+    releaseInstanceLock();
     process.exit(1);
   });
+
+  process.on('unhandledRejection', async (reason) => {
+    console.error('[fatal] unhandled rejection:', reason);
+    await cleanupAllWorkDirs();
+    releaseInstanceLock();
+    process.exit(1);
+  });
+
+  sweepStaleWorkDirs();
+
+  bot
+    .launch()
+    .then(async () => {
+      console.log('Bot is running. Send a Google Drive folder link.');
+      const check = await validateCredentials({
+        apiKey: config.bunnyStreamApiKey,
+        libraryId: config.bunnyStreamLibraryId,
+      });
+      if (check.ok) {
+        console.log('Bunny Stream credentials OK.');
+      } else {
+        console.error(
+          `[warn] Bunny Stream credential check failed (HTTP ${check.status || '?'}): ${check.message} - uploads will fail.`,
+        );
+      }
+    })
+    .catch((err) => {
+      console.error('Failed to start bot:', err.message);
+      process.exit(1);
+    });
+}
